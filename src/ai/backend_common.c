@@ -17,6 +17,7 @@
 */
 
 #include "backend.h"
+#include "backend_remote.h"
 #include "common/darktable.h"
 #include "common/file_location.h"
 #include "control/conf.h"
@@ -432,6 +433,12 @@ dt_ai_onnx_load_ext(const char *model_dir, const char *model_file,
                     const dt_ai_dim_override_t *dim_overrides, int n_overrides,
                     uint32_t ep_flags);
 
+extern dt_ai_context_t *
+dt_ai_onnx_remote_load(const char *model_id, const char *model_file,
+                       dt_ai_opt_level_t opt_level,
+                       const dt_ai_dim_override_t *dim_overrides,
+                       int n_overrides);
+
 static gboolean _provider_cpu_only(const dt_ai_model_info_t *info,
                                    const char *model_file,
                                    dt_ai_provider_t configured);
@@ -470,6 +477,15 @@ dt_ai_context_t *dt_ai_load_model_ext(dt_ai_environment_t *env,
              "[darktable_ai] AI subsystem is disabled");
     return NULL;
   }
+
+  // remote inference: DT_AI_REMOTE routes every load to the loopback
+  // worker except an explicitly CPU-requested one (kept local so e.g.
+  // the SAM decoder stays in-process). a configured remote that fails
+  // here fails the load — never a silent local fallback — so provider
+  // resolution and local ORT setup are skipped entirely
+  if(dt_ai_remote_enabled() && provider != DT_AI_PROVIDER_CPU)
+    return dt_ai_onnx_remote_load(model_id, model_file, opt_level,
+                                  dim_overrides, n_overrides);
 
   // resolve CONFIGURED/AUTO to a concrete EP and apply the model's
   // cpu_only safety constraint in one place. ep_flags is owned by the

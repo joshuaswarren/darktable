@@ -19,6 +19,7 @@
 #include "common/ai/restore.h"
 #include "common/ai/restore_common.h"
 #include "ai/backend.h"
+#include "ai/backend_remote.h"
 #include "common/darktable.h"
 #include "common/ai_models.h"
 #include "common/colorspaces.h"
@@ -608,6 +609,19 @@ gboolean dt_restore_reload_session_cpu(dt_restore_context_t *ctx)
 {
   if(!ctx || !ctx->env || !ctx->env->ai_env || !ctx->model_id)
     return FALSE;
+
+  // with a remote worker configured, every session here is remote
+  // (restore loads CONFIGURED, never a literal CPU provider) and a
+  // failed remote run must surface, not silently continue as a local
+  // CPU session — the remote contract forbids that fallback
+  if(dt_ai_remote_enabled())
+  {
+    dt_print(DT_DEBUG_ALWAYS,
+             "[restore] CPU fallback refused: remote inference is configured "
+             "(DT_AI_REMOTE) for %s",
+             ctx->model_id);
+    return FALSE;
+  }
 
   // unload the old session BEFORE creating the new one: on GPU EPs the
   // failing session may still hold VRAM, and the CPU session creation

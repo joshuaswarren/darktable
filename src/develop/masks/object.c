@@ -16,6 +16,7 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "ai/backend_remote.h"
 #include "common/ai/segmentation.h"
 #include "common/ai_models.h"
 #include "common/colorspaces.h"
@@ -387,8 +388,7 @@ static gpointer _encode_thread_func(gpointer data)
   // encode the image
   gboolean ok = dt_seg_encode_image(d->seg, rgb, out_w, out_h);
 
-  // if accelerated encoding failed, fall back to CPU
-  if(!ok)
+  if(!ok && !dt_ai_remote_enabled())
   {
     dt_print(DT_DEBUG_AI,
              "[object mask] encoding failed, retrying with CPU provider");
