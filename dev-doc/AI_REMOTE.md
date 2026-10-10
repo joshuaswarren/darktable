@@ -1,6 +1,6 @@
 # Remote AI worker (wire protocol v1)
 
-Offloads ONNX inference from the darktable editor to a CUDA host. The editor
+Offloads ONNX inference from the darktable editor to a CUDA or Apple GPU host. The editor
 keeps all other image processing; only denoise/upscale/mask inference runs
 remotely. The worker is loopback-only and is reached over an SSH tunnel, so
 SSH provides authentication and encryption and the worker does neither.
@@ -23,6 +23,12 @@ also remain local.
   overrides with `SessionOptions.add_free_dimension_override_by_name`).
 - The same darktable model packages the editor uses, under a models root.
 
+Alternatively, use Apple Silicon macOS with `numpy` and the standard
+`onnxruntime` wheel. Select `--gpu-provider coreml`. This uses Core ML
+MLProgram with `CPUAndGPU` and disables low-precision GPU accumulation.
+Unsupported Core ML graph partitions fail rather than falling back to ONNX CPU.
+Models must be tested on each backend; CUDA support does not imply Core ML support.
+
 ## Models root
 
 Layout is identical to what darktable scans
@@ -40,14 +46,17 @@ Layout is identical to what darktable scans
 - Per-model `cpu_only` metadata is honored exactly like
   `_provider_cpu_only()` in `src/ai/backend_common.c`: a flat list applies
   to the whole package, an object is keyed by the `.onnx` filename stem,
-  matching is case-insensitive. A `cuda` entry makes the worker refuse a
-  CUDA load of that file — there is no fallback to CPU.
+  matching is case-insensitive. A `cuda` or `coreml` entry refuses a load
+  on that accelerator. An explicit `cpu:true` request still selects CPU.
 
 ## Running
 
 ```sh
 python3 tools/ai/remote_worker.py --models-root ~/darktable-models
 # binds 127.0.0.1:8794; override with --bind/--port (loopback numeric only)
+
+# Apple Silicon worker (same protocol and models directory)
+python3 tools/ai/remote_worker.py --gpu-provider coreml --models-root ~/darktable-models
 ```
 
 On the editor host, point darktable at the tunnel:
@@ -118,5 +127,5 @@ python3 tools/ai/test_remote_worker.py
 
 Covers bind guard, path traversal/symlink escapes, config id matching,
 descriptor bounds, dtype cast rules, protocol framing errors and the
-connection limit — against the real worker process. Real CUDA inference on
-actual models is verified at deployment, not here.
+connection limit against the real worker process. Real CUDA and Core ML inference
+on actual models is verified at deployment, not here.

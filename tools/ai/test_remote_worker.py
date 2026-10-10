@@ -234,6 +234,18 @@ class TestProviderChoice(unittest.TestCase):
         self.assertEqual(rw.choose_provider({'cpu_only': 'x'}, 'm.onnx', False),
                          'CUDAExecutionProvider')
 
+    def test_coreml_respects_model_cpu_only_restrictions(self):
+        for cfg in ({"cpu_only": ["coreml"]},
+                    {"cpu_only": {"m": ["CoreML"]}}):
+            with self.assertRaises(rw.ProtocolError):
+                rw.choose_provider(cfg, "m.onnx", False, "CoreMLExecutionProvider")
+        self.assertEqual(
+            rw.choose_provider({"cpu_only": ["CUDA"]}, "m.onnx", False,
+                               "CoreMLExecutionProvider"), "CoreMLExecutionProvider")
+
+    def test_unknown_accelerator_is_rejected(self):
+        with self.assertRaises(rw.ProtocolError):
+            rw.choose_provider({}, "m.onnx", False, "BogusExecutionProvider")
 
 class TestConversions(unittest.TestCase):
     def test_elemsize_table_matches_numpy(self):

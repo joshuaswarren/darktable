@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
-# Remote darktable AI worker — wire protocol v1 (see dev-doc/AI_REMOTE.md).
-# Loopback-only TCP server: loads ONNX models from a darktable models root
-# and runs inference on CUDA for the darktable editor over an SSH tunnel.
-# Trust boundary: loopback bind enforced, model/file names are basenames
-# constrained to the models root, all descriptor bounds validated before
-# any allocation, no model upload, no CPU fallback when CUDA is requested.
+# Remote darktable AI worker: wire protocol v1 (see dev-doc/AI_REMOTE.md).
+# Loopback plus SSH is the authentication boundary; models stay on the host.
 
 import argparse
 import ipaddress
@@ -163,26 +159,20 @@ def resolve_model(root, model, fname):
     return path, cfg
 
 
-def cpu_only_blocks_cuda(cfg, fname):
-    # mirrors _provider_cpu_only() in src/ai/backend_common.c:
-    # flat list applies to the whole package, object is keyed by the
-    # onnx filename stem, match is case-insensitive, malformed is ignored
-    block = cfg.get('cpu_only')
-    if isinstance(block, list):
-        entries = block
-    elif isinstance(block, dict):
-        entries = block.get(fname[:-len('.onnx')], [])
-    else:
-        return False
-    return any(isinstance(e, str) and e.upper() == 'CUDA' for e in entries)
-
-
-def choose_provider(cfg, fname, cpu):
+def choose_provider(cfg, fname, cpu, gpu_provider='CUDAExecutionProvider'):
+    accelerators = {'CUDAExecutionProvider': 'CUDA', 'CoreMLExecutionProvider': 'COREML'}
+    if gpu_provider not in accelerators:
+        raise ProtocolError('unsupported GPU provider')
     if cpu:
         return 'CPUExecutionProvider'
-    if cpu_only_blocks_cuda(cfg, fname):
-        raise ProtocolError('model marks this file cpu_only for CUDA; refusing without fallback')
-    return 'CUDAExecutionProvider'
+    block = cfg.get('cpu_only')
+    if isinstance(block, dict):
+        block = block.get(fname[:-len('.onnx')], [])
+    if isinstance(block, list) and any(
+            isinstance(entry, str) and entry.upper() == accelerators[gpu_provider] for entry in block):
+        raise ProtocolError(f'model marks this file cpu_only for {accelerators[gpu_provider]}; '
+                            'refusing without fallback')
+    return gpu_provider
 
 
 def validate_overrides(ovr):
@@ -221,8 +211,14 @@ class Session:
         so.graph_optimization_level = getattr(ort.GraphOptimizationLevel, OPT_LEVEL_NAMES[opt])
         for name, value in overrides:
             so.add_free_dimension_override_by_name(name, value)
+        providers = [provider]
+        if provider == 'CoreMLExecutionProvider':
+            so.add_session_config_entry('session.disable_cpu_ep_fallback', '1')
+            providers = [(provider, {'ModelFormat': 'MLProgram', 'MLComputeUnits': 'CPUAndGPU',
+                                     'AllowLowPrecisionAccumulationOnGPU': '0'})]
         try:
-            sess = ort.InferenceSession(path, so, providers=[provider])
+            sess = ort.InferenceSession(path, so, providers=providers)
+            sess.disable_fallback()
         except Exception as exc:
             raise ProtocolError(f'session creation failed: {exc}')
         self.provider = sess.get_providers()[0]
@@ -251,7 +247,7 @@ class Session:
         return self._sess.run(None, feed)
 
 
-def load_session(msg, root):
+def load_session(msg, root, gpu_provider='CUDAExecutionProvider'):
     opt = msg.get('opt', 0)
     if isinstance(opt, bool) or not isinstance(opt, int) or opt not in (0, 1, 2):
         raise ProtocolError('opt must be 0 (all), 1 (basic) or 2 (disabled)')
@@ -259,7 +255,7 @@ def load_session(msg, root):
     if not isinstance(cpu, bool):
         raise ProtocolError('cpu must be a boolean')
     path, cfg = resolve_model(root, msg.get('model'), msg.get('file'))
-    provider = choose_provider(cfg, msg['file'], cpu)
+    provider = choose_provider(cfg, msg['file'], cpu, gpu_provider)
     session = Session(path, msg['model'], msg['file'], provider, opt,
                       validate_overrides(msg.get('overrides')))
     logging.info('loaded %s/%s opt=%d cpu=%s provider=%s',
@@ -310,6 +306,7 @@ def run_inference(session, inputs, outputs, sock):
 
 class Handler(StreamRequestHandler):
     models_root = None
+    gpu_provider = 'CUDAExecutionProvider'
 
     def handle(self):
         if not CONNECTION_SLOTS.acquire(blocking=False):
@@ -332,7 +329,7 @@ class Handler(StreamRequestHandler):
                     raise ProtocolError('unsupported protocol version')
                 op = msg.get('op')
                 if op == 'load':
-                    session = load_session(msg, self.models_root)
+                    session = load_session(msg, self.models_root, self.gpu_provider)
                     self._try_send(load_response(session))
                 elif op == 'run':
                     if session is None:
@@ -369,12 +366,13 @@ def default_models_root():
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description='Loopback CUDA inference worker for remote darktable AI (protocol v1)')
+        description='Loopback GPU inference worker for remote darktable AI (protocol v1)')
     ap.add_argument('--bind', default='127.0.0.1',
                     help='numeric loopback address to bind (default 127.0.0.1)')
     ap.add_argument('--port', type=int, default=DEFAULT_PORT)
     ap.add_argument('--models-root', default=default_models_root(),
                     help='darktable models root (default $XDG_DATA_HOME/darktable/models)')
+    ap.add_argument('--gpu-provider', choices=('cuda', 'coreml'), default='cuda')
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, stream=sys.stderr,
@@ -390,6 +388,8 @@ def main(argv=None):
         sys.exit(f'remote_worker: models root not found: {root}')
 
     Handler.models_root = root
+    Handler.gpu_provider = {'cuda': 'CUDAExecutionProvider',
+                            'coreml': 'CoreMLExecutionProvider'}[args.gpu_provider]
     if isinstance(bind, ipaddress.IPv6Address):
         WorkerServer.address_family = socket.AF_INET6
     server = WorkerServer((str(bind), args.port), Handler)
