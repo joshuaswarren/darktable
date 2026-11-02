@@ -518,3 +518,7 @@ Community
 ---------
 
 * [Darktable forum on pixls.us](https://discuss.pixls.us/c/software/darktable/19)
+
+## Contributors
+
+Everyone credited so far: [CONTRIBUTORS.md](CONTRIBUTORS.md).
